@@ -1,0 +1,738 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"/>
+<meta name="theme-color" content="#0D1B2A"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="在庫管理"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<link rel="manifest" href="manifest.json"/>
+<link rel="apple-touch-icon" href="icons/icon-192.png"/>
+<title>在庫管理システム</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+html,body{height:100%;overflow:hidden;background:#0D1B2A;font-family:'Hiragino Sans','Noto Sans JP',sans-serif;}
+#root{height:100%;overflow:hidden;}
+::-webkit-scrollbar{width:4px;height:4px;}
+::-webkit-scrollbar-thumb{background:#444;border-radius:2px;}
+input[type=number]{-moz-appearance:textfield;}
+input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;}
+@keyframes spin{to{transform:rotate(360deg);}}
+@keyframes fadeUp{from{opacity:0;transform:translateY(16px);}to{opacity:1;transform:translateY(0);}}
+@keyframes slideIn{from{opacity:0;transform:translateX(40px);}to{opacity:1;transform:translateX(0);}}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:.5;}}
+.fade-up{animation:fadeUp 0.3s ease both;}
+.slide-in{animation:slideIn 0.25s ease both;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="module">
+import { createElement as h, useState, useRef, useCallback, useEffect, useMemo, Fragment }
+  from 'https://esm.sh/react@18';
+import { createRoot } from 'https://esm.sh/react-dom@18/client';
+
+/* ═══════════════════════════════════════════════════════
+   DESIGN TOKENS
+═══════════════════════════════════════════════════════ */
+const C = {
+  bg:'#0D1B2A', bgCard:'#132236', bgCardHover:'#1a2e47',
+  surface:'#1B2D42', surfaceHigh:'#243650',
+  sage:'#4A7C59', sageDark:'#2D5016', sageLight:'#a8d5b5', sagePale:'#e8f5ec',
+  amber:'#E09D2A', amberDark:'#C8860A', amberPale:'#fff3cd',
+  red:'#E05252', redPale:'#ffebeb',
+  sky:'#4A9EE0', skyPale:'#e3f2fd',
+  border:'#263d56', borderLight:'#1e3249',
+  text:'#F0EDE8', textMid:'#A8B8C8', textLight:'#607080',
+  white:'#FAFAF8',
+};
+const F = "'Hiragino Sans','Noto Sans JP','Yu Gothic',sans-serif";
+
+/* ═══════════════════════════════════════════════════════
+   XLSX PURE-JS READER
+═══════════════════════════════════════════════════════ */
+function u16(b,o){return b[o]|(b[o+1]<<8);}
+function u32(b,o){return((b[o]|(b[o+1]<<8)|(b[o+2]<<16)|(b[o+3]<<24))>>>0);}
+const DEC=new TextDecoder("utf-8");
+async function inflateRaw(data){
+  const ds=new DecompressionStream("deflate-raw");
+  const w=ds.writable.getWriter(),r=ds.readable.getReader();
+  w.write(data);w.close();
+  const chunks=[];
+  for(;;){const{done,value}=await r.read();if(done)break;chunks.push(value);}
+  const tot=chunks.reduce((s,c)=>s+c.length,0);
+  const out=new Uint8Array(tot);let off=0;
+  for(const c of chunks){out.set(c,off);off+=c.length;}
+  return out;
+}
+async function xlsxToSheets(buf){
+  const b=new Uint8Array(buf);
+  let eocd=-1;
+  for(let i=b.length-22;i>=0;i--){
+    if(b[i]===0x50&&b[i+1]===0x4B&&b[i+2]===0x05&&b[i+3]===0x06){eocd=i;break;}
+  }
+  if(eocd<0)throw new Error("Invalid XLSX");
+  const cdOff=u32(b,eocd+16),cdSz=u32(b,eocd+12);
+  const ents={};
+  let pos=cdOff;
+  while(pos<cdOff+cdSz){
+    if(!(b[pos]===0x50&&b[pos+1]===0x4B&&b[pos+2]===0x01&&b[pos+3]===0x02))break;
+    const fnL=u16(b,pos+28),exL=u16(b,pos+30),cmL=u16(b,pos+32),lh=u32(b,pos+42);
+    ents[DEC.decode(b.slice(pos+46,pos+46+fnL))]=lh;
+    pos+=46+fnL+exL+cmL;
+  }
+  async function rd(name){
+    const lh=ents[name];if(lh==null)return null;
+    const fnL=u16(b,lh+26),exL=u16(b,lh+28),m=u16(b,lh+8),cz=u32(b,lh+18),s=lh+30+fnL+exL;
+    const c=b.slice(s,s+cz);
+    return m===0?DEC.decode(c):m===8?DEC.decode(await inflateRaw(c)):null;
+  }
+  const ssXml=await rd("xl/sharedStrings.xml");
+  const ss=[];
+  if(ssXml)for(const m of ssXml.matchAll(/<si>([\s\S]*?)<\/si>/g))
+    ss.push([...m[1].matchAll(/<t(?:[^>]*)>([\s\S]*?)<\/t>/g)]
+      .map(t=>t[1].replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">")
+               .replace(/&quot;/g,'"').replace(/&#(\d+);/g,(_,n)=>String.fromCharCode(+n)))
+      .join(""));
+  const wbXml=await rd("xl/workbook.xml"),wbR=await rd("xl/_rels/workbook.xml.rels");
+  const sNames=[];
+  if(wbXml)for(const m of(wbXml.match(/<sheet[^>]+>/g)||[])){
+    const nm=m.match(/name="([^"]*)"/),rid=m.match(/r:id="([^"]*)"/);
+    if(nm&&rid){
+      let p=null;
+      if(wbR){const rm=wbR.match(new RegExp(`Id="${rid[1]}"[^>]+Target="([^"]+)"`));if(rm)p="xl/"+rm[1].replace(/^\.\//,"");}
+      sNames.push({name:nm[1],path:p});
+    }
+  }
+  async function parseSheet(path){
+    const xml=await rd(path);if(!xml)return[];
+    const rows=[];
+    for(const rm of xml.matchAll(/<row[^>]*r="(\d+)"[^>]*>([\s\S]*?)<\/row>/g)){
+      const ri=parseInt(rm[1])-1,ra=[];
+      for(const cm of rm[2].matchAll(/<c r="([A-Z]+)\d+"([^>]*)>([\s\S]*?)<\/c>/g)){
+        const ci=cm[1].split("").reduce((a,c)=>a*26+(c.charCodeAt(0)-64),0)-1;
+        const vM=cm[3].match(/<v>([\s\S]*?)<\/v>/);if(!vM)continue;
+        let v=vM[1];
+        if(cm[2].includes('t="s"'))v=ss[parseInt(v)]??v;
+        else{const n=parseFloat(v);if(!isNaN(n))v=n;}
+        while(ra.length<=ci)ra.push(null);ra[ci]=v;
+      }
+      while(rows.length<=ri)rows.push(null);rows[ri]=ra;
+    }
+    return rows;
+  }
+  const sheets={};
+  for(const s of sNames)if(s.path)sheets[s.name]=await parseSheet(s.path);
+  if(!Object.keys(sheets).length)
+    for(const k of Object.keys(ents))
+      if(/xl\/worksheets\/sheet\d+\.xml/.test(k))
+        sheets[`Sheet${k.match(/sheet(\d+)/)[1]}`]=await parseSheet(k);
+  return sheets;
+}
+
+/* ═══════════════════════════════════════════════════════
+   AI
+═══════════════════════════════════════════════════════ */
+async function readInvoiceAI(base64,mediaType){
+  const sys=`あなたは納品書・請求書・仕切書の画像から情報を抽出する専門家です。
+以下のJSON形式のみで返答してください（マークダウン・説明文は一切不要）:
+{"invoice_date":"YYYY/MM/DD","invoice_number":"伝票番号","supplier":"仕入先名","items":[{"code":"商品コード","name":"商品名","qty":数量,"unit":"単位","unit_price":単価,"amount":金額}],"total":合計金額}
+読み取れない項目はnull。数値はスペースなし数値型。`;
+  const res=await fetch("https://api.anthropic.com/v1/messages",{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:2000,system:sys,
+      messages:[{role:"user",content:[
+        {type:"image",source:{type:"base64",media_type:mediaType,data:base64}},
+        {type:"text",text:"この納品書の内容をJSONで出力してください。"}
+      ]}]})
+  });
+  const d=await res.json();
+  return JSON.parse((d.content||[]).map(b=>b.text||"").join("").replace(/```json|```/g,"").trim());
+}
+function fileToB64(file){
+  return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(",")[1]);r.onerror=rej;r.readAsDataURL(file);});
+}
+
+/* ═══════════════════════════════════════════════════════
+   CSV
+═══════════════════════════════════════════════════════ */
+function dlCSV(rows,fname){
+  const csv=rows.map(r=>r.map(v=>`"${String(v??'').replace(/"/g,'""')}"`).join(",")).join("\n");
+  const a=Object.assign(document.createElement("a"),{href:URL.createObjectURL(new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8;"})),download:fname});
+  a.click();
+}
+
+/* ═══════════════════════════════════════════════════════
+   ATOMS
+═══════════════════════════════════════════════════════ */
+function Btn({children,onClick,color=C.sage,ghost=false,disabled=false,full=false,lg=false}){
+  const [pressed,setPressed]=useState(false);
+  return h('button',{onClick,disabled,
+    onPointerDown:()=>setPressed(true),
+    onPointerUp:()=>setPressed(false),
+    onPointerLeave:()=>setPressed(false),
+    style:{
+      background:disabled?C.border:ghost?'transparent':color,
+      color:disabled?C.textLight:ghost?color:C.white,
+      border:`2px solid ${disabled?C.border:color}`,
+      borderRadius:12,
+      padding:lg?'14px 24px':'10px 20px',
+      fontWeight:700,fontSize:lg?16:14,fontFamily:F,
+      cursor:disabled?'not-allowed':'pointer',
+      width:full?'100%':'auto',
+      display:'inline-flex',alignItems:'center',justifyContent:'center',gap:8,
+      whiteSpace:'nowrap',letterSpacing:'0.01em',
+      transform:pressed&&!disabled?'scale(0.97)':'scale(1)',
+      transition:'transform 0.1s,opacity 0.1s',
+      opacity:disabled?0.5:1,
+      WebkitUserSelect:'none',userSelect:'none',
+    }},children);
+}
+
+function Chip({children,color=C.sage}){
+  return h('span',{style:{display:'inline-block',padding:'3px 10px',borderRadius:20,fontSize:11,fontWeight:700,background:color+'28',color,border:`1px solid ${color}55`}},children);
+}
+
+function Card({children,style={},className=''}){
+  return h('div',{className,style:{background:C.bgCard,borderRadius:18,border:`1px solid ${C.border}`,overflow:'hidden',...style}},children);
+}
+
+function Divider(){return h('div',{style:{height:1,background:C.border,margin:'0 -1px'}});}
+
+/* ═══════════════════════════════════════════════════════
+   TOAST
+═══════════════════════════════════════════════════════ */
+function ToastManager({toasts,remove}){
+  return h('div',{style:{position:'fixed',top:'calc(env(safe-area-inset-top) + 16px)',left:16,right:16,zIndex:9999,display:'flex',flexDirection:'column',gap:8,pointerEvents:'none'}},
+    toasts.map(t=>h(ToastItem,{key:t.id,toast:t,remove})));
+}
+function ToastItem({toast,remove}){
+  useEffect(()=>{const id=setTimeout(()=>remove(toast.id),4000);return()=>clearTimeout(id);},[]);
+  const bg=toast.type==='err'?C.red:toast.type==='warn'?C.amber:C.sage;
+  return h('div',{className:'slide-in',style:{background:bg,color:'#fff',borderRadius:14,padding:'12px 16px',fontWeight:700,fontSize:14,fontFamily:F,boxShadow:'0 6px 24px rgba(0,0,0,0.4)',display:'flex',alignItems:'center',gap:10,pointerEvents:'auto'}},
+    h('span',{style:{fontSize:18}},toast.type==='err'?'❌':toast.type==='warn'?'⚠️':'✅'),
+    h('span',null,toast.msg)
+  );
+}
+
+/* ═══════════════════════════════════════════════════════
+   BOTTOM NAV
+═══════════════════════════════════════════════════════ */
+const TABS=[
+  {id:'scan',icon:'📷',label:'スキャン'},
+  {id:'list',icon:'📋',label:'在庫一覧'},
+  {id:'history',icon:'🕘',label:'履歴'},
+  {id:'settings',icon:'⚙️',label:'設定'},
+];
+function BottomNav({active,onChange,badge}){
+  return h('nav',{style:{
+    position:'fixed',bottom:0,left:0,right:0,zIndex:100,
+    background:C.surface,borderTop:`1px solid ${C.border}`,
+    display:'flex',
+    paddingBottom:'env(safe-area-inset-bottom)',
+  }},
+    TABS.map(t=>h('button',{
+      key:t.id,onClick:()=>onChange(t.id),
+      style:{
+        flex:1,padding:'10px 4px 6px',border:'none',
+        background:'transparent',cursor:'pointer',
+        display:'flex',flexDirection:'column',alignItems:'center',gap:3,
+        position:'relative',
+      }},
+      h('span',{style:{fontSize:22,lineHeight:1,opacity:active===t.id?1:0.45,transition:'opacity 0.2s'}},t.icon),
+      h('span',{style:{fontSize:10,fontWeight:active===t.id?700:400,color:active===t.id?C.sage:C.textLight,fontFamily:F,transition:'color 0.2s'}},t.label),
+      active===t.id&&h('div',{style:{position:'absolute',top:0,left:'50%',transform:'translateX(-50%)',width:32,height:3,borderRadius:2,background:C.sage,marginTop:-1}}),
+      t.id==='history'&&badge>0&&h('div',{style:{position:'absolute',top:8,right:'calc(50% - 18px)',background:C.amber,color:'#fff',fontSize:9,fontWeight:700,borderRadius:8,padding:'1px 5px',minWidth:16,textAlign:'center'}},badge)
+    ))
+  );
+}
+
+/* ═══════════════════════════════════════════════════════
+   SCAN TAB
+═══════════════════════════════════════════════════════ */
+function ScanTab({hasExcel,onInvoiceResult,onLoadExcel,xlsxName}){
+  const [mode,setMode]=useState('idle');
+  const [preview,setPreview]=useState(null);
+  const [capFile,setCapFile]=useState(null);
+  const [err,setErr]=useState(null);
+  const vidRef=useRef(),streamRef=useRef(),fileRef=useRef(),xlsxRef=useRef();
+
+  const stopStream=useCallback(()=>{streamRef.current?.getTracks().forEach(t=>t.stop());streamRef.current=null;},[]);
+  useEffect(()=>()=>stopStream(),[stopStream]);
+
+  const startCam=async()=>{
+    setErr(null);
+    try{
+      const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment',width:{ideal:1920}}});
+      streamRef.current=s;setMode('camera');
+      setTimeout(()=>{if(vidRef.current)vidRef.current.srcObject=s;},100);
+    }catch{setErr('カメラへのアクセスが拒否されました');}
+  };
+
+  const snap=useCallback(()=>{
+    if(!vidRef.current)return;
+    const cv=document.createElement('canvas');
+    cv.width=vidRef.current.videoWidth;cv.height=vidRef.current.videoHeight;
+    cv.getContext('2d').drawImage(vidRef.current,0,0);
+    cv.toBlob(blob=>{
+      const f=new File([blob],'cap.jpg',{type:'image/jpeg'});
+      setCapFile(f);setPreview(cv.toDataURL('image/jpeg'));
+      stopStream();setMode('preview');
+    },'image/jpeg',0.92);
+  },[stopStream]);
+
+  const pickImg=f=>{setCapFile(f);setPreview(URL.createObjectURL(f));setMode('preview');setErr(null);};
+
+  const analyze=async()=>{
+    if(!capFile)return;setMode('analyzing');setErr(null);
+    try{
+      const b64=await fileToB64(capFile);
+      const result=await readInvoiceAI(b64,capFile.type||'image/jpeg');
+      onInvoiceResult(result);reset();
+    }catch(e){setErr('読み取りに失敗: '+(e.message||'不明'));setMode('preview');}
+  };
+
+  const reset=()=>{stopStream();setMode('idle');setPreview(null);setCapFile(null);setErr(null);if(fileRef.current)fileRef.current.value='';};
+
+  return h('div',{style:{flex:1,overflowY:'auto',padding:'16px 16px calc(80px + env(safe-area-inset-bottom))'}},
+    // Excel status bar
+    h(Card,{style:{padding:'14px 16px',marginBottom:16,display:'flex',alignItems:'center',gap:12}},
+      h('div',{style:{width:40,height:40,borderRadius:10,background:xlsxName?C.sage:C.border,display:'flex',alignItems:'center',justifyContent:'center',fontSize:20,flexShrink:0}},xlsxName?'📊':'📂'),
+      h('div',{style:{flex:1,minWidth:0}},
+        h('div',{style:{fontWeight:700,fontSize:13,color:C.text}},xlsxName?'在庫表 読込済':'在庫管理表を読み込む'),
+        h('div',{style:{fontSize:11,color:C.textMid,marginTop:2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},xlsxName||'タップして .xlsx ファイルを選択')
+      ),
+      h(Btn,{onClick:()=>xlsxRef.current?.click(),color:xlsxName?C.textLight:C.sage,ghost:!!xlsxName},xlsxName?'変更':'選択'),
+      h('input',{ref:xlsxRef,type:'file',accept:'.xlsx,.xls',onChange:e=>{if(e.target.files[0])onLoadExcel(e.target.files[0]);},style:{display:'none'}})
+    ),
+
+    err&&h('div',{className:'fade-up',style:{background:'#3a1515',border:`1px solid ${C.red}55`,borderRadius:12,padding:'12px 16px',fontSize:13,color:C.red,marginBottom:16}},`⚠️ ${err}`),
+
+    // Scanner area
+    mode==='idle'&&h(Fragment,null,
+      h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:16}},
+        h('button',{onClick:startCam,style:{background:C.surface,border:`2px solid ${C.border}`,borderRadius:16,padding:'24px 12px',cursor:'pointer',display:'flex',flexDirection:'column',alignItems:'center',gap:10,WebkitUserSelect:'none'}},
+          h('span',{style:{fontSize:44}},'\u{1F4F7}'),
+          h('span',{style:{fontWeight:700,fontSize:14,color:C.text,fontFamily:F}},'カメラ撮影')
+        ),
+        h('button',{onClick:()=>fileRef.current?.click(),style:{background:C.surface,border:`2px solid ${C.border}`,borderRadius:16,padding:'24px 12px',cursor:'pointer',display:'flex',flexDirection:'column',alignItems:'center',gap:10,WebkitUserSelect:'none'}},
+          h('span',{style:{fontSize:44}},'\u{1F4C1}'),
+          h('span',{style:{fontWeight:700,fontSize:14,color:C.text,fontFamily:F}},'画像を選択')
+        )
+      ),
+      h('input',{ref:fileRef,type:'file',accept:'image/*',onChange:e=>{if(e.target.files[0])pickImg(e.target.files[0]);},style:{display:'none'}}),
+      h(Card,{style:{padding:'16px',textAlign:'center'}},
+        h('div',{style:{fontSize:32,marginBottom:8}},'💡'),
+        h('p',{style:{fontSize:13,color:C.textMid,lineHeight:1.7,fontFamily:F}},
+          '納品書・請求書・仕切書を撮影すると',h('br'),'AIが品目・数量を自動で読み取ります'
+        )
+      )
+    ),
+
+    mode==='camera'&&h('div',{style:{position:'relative',borderRadius:16,overflow:'hidden',background:'#000',marginBottom:16}},
+      h('video',{ref:vidRef,autoPlay:true,playsInline:true,muted:true,style:{width:'100%',maxHeight:'55vw',objectFit:'cover',display:'block'}}),
+      h('div',{style:{position:'absolute',inset:0,border:'3px dashed rgba(74,124,89,0.8)',borderRadius:16,pointerEvents:'none'}}),
+      h('div',{style:{position:'absolute',bottom:16,left:0,right:0,display:'flex',justifyContent:'center',gap:12}},
+        h(Btn,{onClick:snap,color:C.sage,lg:true},'📸 撮影する'),
+        h(Btn,{onClick:reset,ghost:true,color:C.textMid},'✕')
+      )
+    ),
+
+    mode==='preview'&&h('div',{className:'fade-up'},
+      h('div',{style:{borderRadius:16,overflow:'hidden',marginBottom:16,border:`2px solid ${C.sage}`}},
+        h('img',{src:preview,style:{width:'100%',maxHeight:'55vw',objectFit:'contain',display:'block',background:'#111'}})
+      ),
+      h('div',{style:{display:'flex',gap:10}},
+        h(Btn,{onClick:analyze,color:C.sage,full:true,lg:true},'🔍 AIで読み取る'),
+        h(Btn,{onClick:reset,ghost:true,color:C.textMid},'✕')
+      )
+    ),
+
+    mode==='analyzing'&&h('div',{style:{textAlign:'center',padding:'48px 0'}},
+      h('div',{style:{fontSize:56,display:'inline-block',animation:'spin 1.1s linear infinite'}},'\u2699\uFE0F'),
+      h('div',{style:{fontWeight:800,fontSize:18,color:C.text,marginTop:16,fontFamily:F}},'AIが解析中...'),
+      h('div',{style:{color:C.textMid,fontSize:14,marginTop:6}},'品目・数量・単価を抽出しています')
+    )
+  );
+}
+
+/* ═══════════════════════════════════════════════════════
+   INVOICE REVIEW MODAL
+═══════════════════════════════════════════════════════ */
+function InvoiceModal({invoice,dataRows,headerRow,onApply,onClose}){
+  const nameIdx=useMemo(()=>headerRow?headerRow.findIndex(h=>String(h||'').match(/品名|商品名/)):-1,[headerRow]);
+  const [items,setItems]=useState(()=>(invoice.items||[]).map((it,i)=>{
+    const nq=(it.name||'').toLowerCase().replace(/\s/g,'');
+    let mr=-1;
+    if(dataRows&&nameIdx>=0){
+      for(let r=0;r<dataRows.length;r++){
+        const row=dataRows[r];if(!row)continue;
+        const cell=String(row[nameIdx]||'').toLowerCase().replace(/\s/g,'');
+        if(cell&&nq&&(cell.includes(nq)||nq.includes(cell))){mr=r;break;}
+      }
+    }
+    return{...it,_i:i,_mr:mr,_on:true};
+  }));
+  const toggle=i=>setItems(p=>p.map((r,j)=>j===i?{...r,_on:!r._on}:r));
+  const setQty=(i,v)=>setItems(p=>p.map((r,j)=>j===i?{...r,qty:Math.max(0,parseFloat(v)||0)}:r));
+  const setMr=(i,v)=>setItems(p=>p.map((r,j)=>j===i?{...r,_mr:parseInt(v)}:r));
+  const checked=items.filter(r=>r._on);
+
+  return h('div',{style:{
+    position:'fixed',inset:0,zIndex:200,
+    background:'rgba(0,0,0,0.75)',backdropFilter:'blur(4px)',
+    display:'flex',flexDirection:'column',justifyContent:'flex-end',
+  }},
+    h('div',{className:'fade-up',style:{
+      background:C.bgCard,borderRadius:'20px 20px 0 0',
+      maxHeight:'88vh',display:'flex',flexDirection:'column',
+      paddingBottom:'env(safe-area-inset-bottom)',
+    }},
+      // Handle bar
+      h('div',{style:{display:'flex',justifyContent:'center',padding:'12px 0 0'}},
+        h('div',{style:{width:40,height:4,borderRadius:2,background:C.border}})
+      ),
+      // Header
+      h('div',{style:{padding:'12px 18px 14px',display:'flex',justifyContent:'space-between',alignItems:'flex-start'}},
+        h('div',null,
+          h('div',{style:{fontWeight:800,fontSize:16,color:C.text,fontFamily:F}},'📄 読み取り結果'),
+          h('div',{style:{fontSize:12,color:C.textMid,marginTop:3}},
+            [invoice.invoice_date&&`${invoice.invoice_date}`,invoice.supplier&&invoice.supplier,invoice.invoice_number&&`No.${invoice.invoice_number}`].filter(Boolean).join('　')
+          ),
+          h('div',{style:{marginTop:6,display:'flex',gap:6,flexWrap:'wrap'}},
+            h(Chip,{color:C.sage},`✓ 照合 ${items.filter(r=>r._mr>=0).length}件`),
+            items.filter(r=>r._mr<0).length>0&&h(Chip,{color:C.amber},`新規 ${items.filter(r=>r._mr<0).length}件`)
+          )
+        ),
+        h('button',{onClick:onClose,style:{background:'transparent',border:'none',fontSize:20,cursor:'pointer',color:C.textLight,padding:4}},'✕')
+      ),
+      h(Divider),
+      // Items list
+      h('div',{style:{overflowY:'auto',flex:1,padding:'12px 16px',display:'flex',flexDirection:'column',gap:10}},
+        items.map((it,i)=>h(Card,{key:i,style:{padding:'14px',opacity:it._on?1:0.5}},
+          h('div',{style:{display:'flex',alignItems:'flex-start',gap:12}},
+            h('button',{onClick:()=>toggle(i),style:{flexShrink:0,width:24,height:24,borderRadius:6,border:`2px solid ${it._on?C.sage:C.border}`,background:it._on?C.sage:'transparent',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',marginTop:1}},
+              it._on&&h('span',{style:{color:'#fff',fontSize:14}},'✓')
+            ),
+            h('div',{style:{flex:1,minWidth:0}},
+              h('div',{style:{fontWeight:700,fontSize:14,color:C.text,fontFamily:F}},it.name||'—'),
+              h('div',{style:{display:'flex',gap:8,marginTop:6,alignItems:'center',flexWrap:'wrap'}},
+                h('div',{style:{display:'flex',alignItems:'center',gap:6}},
+                  h('span',{style:{fontSize:12,color:C.textMid}},'数量:'),
+                  h('input',{type:'number',value:it.qty??'',onChange:e=>setQty(i,e.target.value),disabled:!it._on,
+                    style:{width:72,padding:'5px 8px',borderRadius:8,border:`1px solid ${C.border}`,background:C.surface,color:C.text,fontSize:14,fontFamily:F,textAlign:'right'}}),
+                  h('span',{style:{fontSize:12,color:C.textMid}},it.unit||'')
+                ),
+                it.unit_price!=null&&h('span',{style:{fontSize:12,color:C.textMid}},`¥${Number(it.unit_price).toLocaleString()}/個`)
+              ),
+              dataRows&&dataRows.length>0&&h('div',{style:{marginTop:8}},
+                h('select',{value:it._mr,onChange:e=>setMr(i,e.target.value),disabled:!it._on,
+                  style:{width:'100%',padding:'6px 10px',borderRadius:8,border:`1px solid ${C.border}`,background:C.surface,color:it._mr>=0?C.sageLight:C.textMid,fontSize:12,fontFamily:F}},
+                  h('option',{value:-1},'— 新規追加 —'),
+                  dataRows.map((row,ri)=>row&&nameIdx>=0&&row[nameIdx]?h('option',{key:ri,value:ri},String(row[nameIdx]).substring(0,28)):null)
+                )
+              )
+            )
+          )
+        ))
+      ),
+      // Footer
+      h(Divider),
+      h('div',{style:{padding:'14px 16px',display:'flex',gap:10}},
+        h(Btn,{onClick:onClose,ghost:true,color:C.textMid},'キャンセル'),
+        h(Btn,{onClick:()=>onApply(checked,invoice),disabled:checked.length===0,color:C.sage,full:true,lg:true},`✓ ${checked.length}件を在庫に反映`)
+      )
+    )
+  );
+}
+
+/* ═══════════════════════════════════════════════════════
+   LIST TAB
+═══════════════════════════════════════════════════════ */
+function ListTab({dataRows,header,highlights,onExport}){
+  const [search,setSearch]=useState('');
+  const nameIdx=useMemo(()=>header?header.findIndex(h=>String(h||'').match(/品名|商品名/)):-1,[header]);
+  const filtered=useMemo(()=>{
+    if(!dataRows)return[];
+    let arr=dataRows.filter(Boolean);
+    if(search){const q=search.toLowerCase();arr=arr.filter(r=>r.some(c=>String(c||'').toLowerCase().includes(q)));}
+    return arr;
+  },[dataRows,search]);
+
+  if(!header||!dataRows)return h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center',flexDirection:'column',gap:16,padding:32,paddingBottom:'80px'}},
+    h('div',{style:{fontSize:64}},'📋'),
+    h('div',{style:{fontWeight:700,fontSize:16,color:C.textMid,textAlign:'center',fontFamily:F}},'在庫管理表を読み込むと\nここに一覧が表示されます')
+  );
+
+  // Pick most relevant columns for mobile display
+  const displayCols=[];
+  const nameCi=header.findIndex(h=>String(h||'').match(/品名|商品名/));
+  const qtyCi=header.findIndex(h=>String(h||'').match(/在庫|数量|残|ケース|納品/));
+  const codeCi=header.findIndex(h=>String(h||'').match(/コード|code/i));
+  if(codeCi>=0)displayCols.push({i:codeCi,label:String(header[codeCi]),w:70});
+  if(nameCi>=0)displayCols.push({i:nameCi,label:String(header[nameCi]),w:null,flex:true});
+  if(qtyCi>=0)displayCols.push({i:qtyCi,label:String(header[qtyCi]),w:60,align:'right'});
+  // fallback: show first 3 cols
+  if(!displayCols.length)header.slice(0,3).forEach((h,i)=>displayCols.push({i,label:String(h||''),w:null,flex:i===1}));
+
+  return h('div',{style:{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}},
+    // Search bar
+    h('div',{style:{padding:'12px 16px',background:C.bgCard,borderBottom:`1px solid ${C.border}`,display:'flex',gap:10,alignItems:'center'}},
+      h('div',{style:{flex:1,position:'relative'}},
+        h('span',{style:{position:'absolute',left:10,top:'50%',transform:'translateY(-50%)',fontSize:16,pointerEvents:'none'}},'🔍'),
+        h('input',{value:search,onChange:e=>setSearch(e.target.value),placeholder:'品名・コードで検索...',
+          style:{width:'100%',padding:'9px 12px 9px 34px',borderRadius:10,border:`1px solid ${C.border}`,background:C.surface,color:C.text,fontSize:14,fontFamily:F,outline:'none'}})
+      ),
+      h(Btn,{onClick:onExport,color:C.sage,ghost:false},'⬇ CSV')
+    ),
+    // List
+    h('div',{style:{flex:1,overflowY:'auto',paddingBottom:'env(safe-area-inset-bottom)'}},
+      h('div',{style:{padding:'8px 16px 4px',fontSize:11,color:C.textLight,fontFamily:F}},`${filtered.length}件`),
+      filtered.map((row,ri)=>{
+        const hl=nameCi>=0&&highlights.some(h=>String(row[nameCi]||'').includes(h)||h.includes(String(row[nameCi]||'')));
+        return h('div',{key:ri,style:{
+          background:hl?'rgba(74,124,89,0.15)':ri%2===0?C.bgCard:'transparent',
+          borderBottom:`1px solid ${C.borderLight}`,
+          padding:'12px 16px',display:'flex',alignItems:'center',gap:10,
+        }},
+          hl&&h('span',{style:{color:C.sage,fontSize:12,flexShrink:0}},'★'),
+          displayCols.map(col=>h('div',{key:col.i,style:{
+            flex:col.flex?1:undefined,width:col.w||undefined,
+            fontSize:13,color:col.flex?C.text:C.textMid,
+            fontWeight:col.flex?600:400,fontFamily:F,
+            overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',
+            textAlign:col.align||'left',
+          }},String(row[col.i]??'')))
+        );
+      }),
+      filtered.length===0&&h('div',{style:{padding:'48px',textAlign:'center',color:C.textLight,fontSize:14,fontFamily:F}},'該当なし')
+    )
+  );
+}
+
+/* ═══════════════════════════════════════════════════════
+   HISTORY TAB
+═══════════════════════════════════════════════════════ */
+function HistoryTab({history,onClear}){
+  if(!history.length)return h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center',flexDirection:'column',gap:16,padding:32,paddingBottom:'80px'}},
+    h('div',{style:{fontSize:64}},'🕘'),
+    h('div',{style:{fontWeight:700,fontSize:16,color:C.textMid,textAlign:'center',fontFamily:F}},'まだ反映履歴がありません')
+  );
+  return h('div',{style:{flex:1,overflowY:'auto',padding:'12px 16px',paddingBottom:'calc(80px + env(safe-area-inset-bottom))'}},
+    h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}},
+      h('div',{style:{fontWeight:700,fontSize:14,color:C.text}},'反映履歴'),
+      h(Btn,{onClick:onClear,ghost:true,color:C.textLight},'クリア')
+    ),
+    h('div',{style:{display:'flex',flexDirection:'column',gap:8}},
+      [...history].reverse().map((e,i)=>h(Card,{key:i,style:{padding:'14px 16px'}},
+        h('div',{style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}},
+          h(Chip,{color:e.isNew?C.sky:C.sage},e.isNew?'新規追加':'更新'),
+          h('span',{style:{fontWeight:700,fontSize:14,color:C.text,flex:1,fontFamily:F}},e.name),
+          h('span',{style:{fontWeight:800,fontSize:16,color:C.sage}},`${e.qty} ${e.unit}`)
+        ),
+        h('div',{style:{fontSize:11,color:C.textLight,marginTop:6}},e.time)
+      ))
+    )
+  );
+}
+
+/* ═══════════════════════════════════════════════════════
+   SETTINGS TAB
+═══════════════════════════════════════════════════════ */
+function SettingsTab({xlsxName,onLoadExcel,onClearData}){
+  const ref=useRef();
+  const [installed,setInstalled]=useState(false);
+  const [deferredPrompt,setDP]=useState(null);
+
+  useEffect(()=>{
+    if(window.matchMedia('(display-mode: standalone)').matches)setInstalled(true);
+    const handler=e=>{e.preventDefault();setDP(e);};
+    window.addEventListener('beforeinstallprompt',handler);
+    return()=>window.removeEventListener('beforeinstallprompt',handler);
+  },[]);
+
+  const installPWA=async()=>{
+    if(!deferredPrompt)return;
+    deferredPrompt.prompt();
+    const{outcome}=await deferredPrompt.userChoice;
+    if(outcome==='accepted')setInstalled(true);
+    setDP(null);
+  };
+
+  const rows=[
+    {icon:'📊',label:'在庫管理表',value:xlsxName||'未読み込み',action:()=>ref.current?.click(),btn:'変更'},
+    {icon:'🗑️',label:'データをリセット',value:'在庫データをクリアします',action:onClearData,btn:'リセット',danger:true},
+  ];
+
+  return h('div',{style:{flex:1,overflowY:'auto',padding:'16px 16px',paddingBottom:'calc(80px + env(safe-area-inset-bottom))'}},
+    !installed&&deferredPrompt&&h(Card,{style:{padding:'20px',marginBottom:16,border:`2px solid ${C.sage}`}},
+      h('div',{style:{fontWeight:800,fontSize:15,color:C.text,marginBottom:6,fontFamily:F}},'📱 ホーム画面に追加'),
+      h('p',{style:{fontSize:13,color:C.textMid,marginBottom:14,lineHeight:1.6}},'インストールするとオフラインでも使え、アプリのように起動できます。'),
+      h(Btn,{onClick:installPWA,color:C.sage,full:true,lg:true},'ホーム画面に追加する')
+    ),
+    installed&&h(Card,{style:{padding:'14px 16px',marginBottom:16,display:'flex',alignItems:'center',gap:10}},
+      h('span',{style:{fontSize:20}},'✅'),
+      h('span',{style:{fontSize:13,color:C.sageLight,fontWeight:600}},'ホーム画面にインストール済み')
+    ),
+    // iOS instruction
+    !installed&&!deferredPrompt&&h(Card,{style:{padding:'18px',marginBottom:16,border:`1px solid ${C.sky}44`}},
+      h('div',{style:{fontWeight:800,fontSize:14,color:C.text,marginBottom:8}},'📱 iOSでのインストール方法'),
+      h('ol',{style:{fontSize:13,color:C.textMid,paddingLeft:18,lineHeight:2}},
+        h('li',null,'Safari でこのページを開く'),
+        h('li',null,'下部の 共有ボタン（□↑）をタップ'),
+        h('li',null,'「ホーム画面に追加」を選択'),
+        h('li',null,'「追加」をタップ')
+      )
+    ),
+    h('div',{style:{display:'flex',flexDirection:'column',gap:10}},
+      rows.map((r,i)=>h(Card,{key:i,style:{padding:'16px'}},
+        h('div',{style:{display:'flex',alignItems:'center',gap:12}},
+          h('div',{style:{fontSize:24,width:36,textAlign:'center'}},r.icon),
+          h('div',{style:{flex:1}},
+            h('div',{style:{fontWeight:700,fontSize:14,color:C.text,fontFamily:F}},r.label),
+            h('div',{style:{fontSize:12,color:C.textMid,marginTop:2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},r.value)
+          ),
+          h(Btn,{onClick:r.action,color:r.danger?C.red:C.sage,ghost:!r.danger},r.btn)
+        )
+      ))
+    ),
+    h('input',{ref,type:'file',accept:'.xlsx,.xls',onChange:e=>{if(e.target.files[0])onLoadExcel(e.target.files[0]);},style:{display:'none'}}),
+    h('div',{style:{marginTop:20,textAlign:'center',fontSize:11,color:C.textLight,fontFamily:F}},'在庫管理システム v1.0 | Powered by Claude AI')
+  );
+}
+
+/* ═══════════════════════════════════════════════════════
+   MAIN APP
+═══════════════════════════════════════════════════════ */
+function App(){
+  const [tab,setTab]=useState('scan');
+  const [xlsxFile,setXlsxFile]=useState(null);
+  const [sheets,setSheets]=useState(null);
+  const [activeSheet,setActiveSheet]=useState(null);
+  const [liveRows,setLiveRows]=useState(null);
+  const [headerIdx,setHeaderIdx]=useState(0);
+  const [loading,setLoading]=useState(false);
+  const [invoice,setInvoice]=useState(null);
+  const [history,setHistory]=useState([]);
+  const [highlights,setHighlights]=useState([]);
+  const [toasts,setToasts]=useState([]);
+
+  const addToast=(msg,type='ok')=>setToasts(p=>[...p,{id:Date.now()+Math.random(),msg,type}]);
+  const removeToast=id=>setToasts(p=>p.filter(t=>t.id!==id));
+
+  const loadExcel=useCallback(async file=>{
+    setLoading(true);
+    try{
+      const buf=await file.arrayBuffer();
+      const parsed=await xlsxToSheets(buf);
+      const names=Object.keys(parsed);
+      if(!names.length)throw new Error('シートが見つかりません');
+      setXlsxFile(file);setSheets(parsed);
+      const first=names[0];setActiveSheet(first);
+      const rows=parsed[first]||[];
+      let hi=0;for(let i=0;i<Math.min(5,rows.length);i++)if(rows[i]?.some(Boolean)){hi=i;break;}
+      setHeaderIdx(hi);setLiveRows(rows.map(r=>r?[...r]:null));
+      addToast(`✅ Excelを読み込みました（${names.length}シート）`);
+      setTab('list');
+    }catch(e){addToast('読み込み失敗: '+e.message,'err');}
+    finally{setLoading(false);}
+  },[]);
+
+  const applyInvoice=useCallback((checked,inv)=>{
+    if(!liveRows||!checked.length)return;
+    const hdr=liveRows[headerIdx]||[];
+    const qi=hdr.findIndex(h=>String(h||'').match(/在庫|数量|残|ケース|納品/));
+    const ni=hdr.findIndex(h=>String(h||'').match(/品名|商品名/));
+    const newRows=liveRows.map(r=>r?[...r]:null);
+    const hl=[],log=[];
+    const now=new Date().toLocaleString('ja-JP');
+    for(const it of checked){
+      if(it._mr>=0&&it._mr<newRows.length){
+        const row=newRows[it._mr];if(!row)continue;
+        if(qi>=0)row[qi]=(Number(row[qi])||0)+(it.qty||0);
+        const name=ni>=0?String(row[ni]||''):it.name||'';
+        hl.push(name);log.push({name,qty:it.qty||0,unit:it.unit||'',time:now,isNew:false});
+      }else{
+        const nr=new Array(hdr.length).fill(null);
+        if(ni>=0)nr[ni]=it.name||'';
+        if(qi>=0)nr[qi]=it.qty||0;
+        newRows.push(nr);hl.push(it.name||'');
+        log.push({name:it.name||'',qty:it.qty||0,unit:it.unit||'',time:now,isNew:true});
+      }
+    }
+    setLiveRows(newRows);setHighlights(hl);setHistory(p=>[...p,...log]);
+    setInvoice(null);addToast(`✅ ${log.length}件を在庫表に反映しました`);
+    setTab('list');
+  },[liveRows,headerIdx]);
+
+  const exportCSV=useCallback(()=>{
+    if(!liveRows)return;
+    dlCSV(liveRows.filter(Boolean),xlsxFile?xlsxFile.name.replace(/\.xlsx?$/i,'_更新.csv'):'在庫_更新.csv');
+    addToast('📥 CSVをダウンロードしました');
+  },[liveRows,xlsxFile]);
+
+  const clearData=()=>{
+    if(!confirm('データをリセットしますか？'))return;
+    setXlsxFile(null);setSheets(null);setLiveRows(null);setHistory([]);setHighlights([]);setInvoice(null);
+    addToast('データをリセットしました','warn');setTab('scan');
+  };
+
+  const header=liveRows?liveRows[headerIdx]:null;
+  const dataRows=liveRows?liveRows.slice(headerIdx+1).filter(Boolean):null;
+
+  // Loading overlay
+  if(loading)return h('div',{style:{height:'100vh',display:'flex',alignItems:'center',justifyContent:'center',flexDirection:'column',gap:16,background:C.bg}},
+    h('div',{style:{fontSize:56,animation:'spin 1.1s linear infinite'}},'\u2699\uFE0F'),
+    h('div',{style:{color:C.text,fontWeight:700,fontSize:18,fontFamily:F}},'読み込み中...')
+  );
+
+  return h('div',{style:{height:'100vh',display:'flex',flexDirection:'column',background:C.bg,overflowX:'hidden'}},
+    h(ToastManager,{toasts,remove:removeToast}),
+
+    // Header
+    h('header',{style:{
+      background:C.surface,borderBottom:`1px solid ${C.border}`,
+      padding:`calc(env(safe-area-inset-top) + 10px) 16px 10px`,
+      display:'flex',alignItems:'center',justifyContent:'space-between',
+      flexShrink:0,
+    }},
+      h('div',{style:{display:'flex',alignItems:'center',gap:10}},
+        h('div',{style:{width:36,height:36,borderRadius:10,background:C.sage,display:'flex',alignItems:'center',justifyContent:'center',fontSize:20}},'\u{1F4E6}'),
+        h('div',null,
+          h('div',{style:{fontWeight:900,fontSize:17,color:C.text,fontFamily:F,letterSpacing:'-0.3px'}},'在庫管理'),
+          h('div',{style:{fontSize:10,color:C.textLight}},xlsxFile?`📊 ${xlsxFile.name}`:'納品書スキャン → Excel自動反映')
+        )
+      ),
+      tab==='list'&&dataRows&&h(Btn,{onClick:exportCSV,color:C.sage},'⬇ CSV')
+    ),
+
+    // Tab content
+    h('div',{style:{flex:1,overflow:'hidden',display:'flex',flexDirection:'column'}},
+      tab==='scan'&&h(ScanTab,{hasExcel:!!xlsxFile,onInvoiceResult:r=>setInvoice(r),onLoadExcel:loadExcel,xlsxName:xlsxFile?.name}),
+      tab==='list'&&h(ListTab,{dataRows,header,highlights,onExport:exportCSV}),
+      tab==='history'&&h(HistoryTab,{history,onClear:()=>setHistory([])}),
+      tab==='settings'&&h(SettingsTab,{xlsxName:xlsxFile?.name,onLoadExcel:loadExcel,onClearData:clearData})
+    ),
+
+    // Invoice modal
+    invoice&&h(InvoiceModal,{invoice,dataRows,headerRow:header,onApply:applyInvoice,onClose:()=>setInvoice(null)}),
+
+    // Bottom nav
+    h(BottomNav,{active:tab,onChange:setTab,badge:history.length})
+  );
+}
+
+/* ═══════════════════════════════════════════════════════
+   BOOT
+═══════════════════════════════════════════════════════ */
+createRoot(document.getElementById('root')).render(h(App));
+
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('./sw.js').catch(()=>{});
+}
+</script>
+</body>
+</html>
