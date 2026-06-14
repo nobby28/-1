@@ -93,6 +93,28 @@ const SYS=`あなたは薬局の仕切書から医薬品情報を抽出する専
 
 数値は数値型で。読み取れない場合はnull。`;
 
+/* ── IMAGE COMPRESSION ── */
+async function compressImage(file,maxPx=2048,quality=0.85){
+  return new Promise(resolve=>{
+    const img=new Image();
+    const url=URL.createObjectURL(file);
+    img.onload=()=>{
+      URL.revokeObjectURL(url);
+      let{width:w,height:h}=img;
+      if(w>maxPx||h>maxPx){
+        if(w>h){h=Math.round(h*maxPx/w);w=maxPx;}
+        else{w=Math.round(w*maxPx/h);h=maxPx;}
+      }
+      const cv=document.createElement('canvas');
+      cv.width=w;cv.height=h;
+      cv.getContext('2d').drawImage(img,0,0,w,h);
+      cv.toBlob(blob=>resolve(new File([blob],'img.jpg',{type:'image/jpeg'})),'image/jpeg',quality);
+    };
+    img.onerror=()=>{URL.revokeObjectURL(url);resolve(file);};
+    img.src=url;
+  });
+}
+
 /* ── AI CALL ── */
 async function extractInvoice(base64,mediaType,apiKey,model){
   const res=await fetch('https://api.anthropic.com/v1/messages',{
@@ -115,11 +137,15 @@ async function extractInvoice(base64,mediaType,apiKey,model){
   });
   if(!res.ok){
     const e=await res.json().catch(()=>({error:{message:res.statusText}}));
-    throw new Error(e.error?.message||`API Error ${res.status}`);
+    const msg=e.error?.message||res.statusText;
+    throw new Error(`[HTTP ${res.status}] ${msg}`);
   }
   const d=await res.json();
-  const txt=(d.content||[]).map(b=>b.text||'').join('').replace(/```json\n?|```/g,'').trim();
-  return JSON.parse(txt);
+  const raw=(d.content||[]).map(b=>b.text||'').join('');
+  const match=raw.match(/\{[\s\S]*\}/);
+  if(!match) throw new Error('AIの応答にJSONが見つかりません: '+raw.slice(0,120));
+  try{return JSON.parse(match[0]);}
+  catch(pe){throw new Error('JSON解析エラー: '+pe.message+' / 応答: '+raw.slice(0,80));}
 }
 
 function fileToB64(file){
@@ -292,11 +318,18 @@ function ScanTab({apiKey,model,onScanned}){
     if(!apiKey){setErr('設定タブでAnthropicのAPIキーを入力してください');return;}
     setMode('analyzing');setErr(null);
     try{
-      const b64=await fileToB64(capFile);
-      const result=await extractInvoice(b64,capFile.type||'image/jpeg',apiKey,model);
-      if(!result.items?.length)throw new Error('商品情報が読み取れませんでした');
+      const compressed=await compressImage(capFile);
+      const b64=await fileToB64(compressed);
+      const result=await extractInvoice(b64,'image/jpeg',apiKey,model);
+      if(!result.items?.length)throw new Error('商品情報が読み取れませんでした（0件）');
       onScanned(result);reset();
-    }catch(e){setErr('読み取りエラー: '+(e.message||'不明'));setMode('preview');}
+    }catch(e){
+      const msg=e.message||'不明なエラー';
+      setErr(msg.startsWith('[HTTP 401]')?'APIキーが無効です。設定タブで正しいキーを入力してください':
+             msg.startsWith('[HTTP 4')?'APIエラー: '+msg:
+             '読み取りエラー: '+msg);
+      setMode('preview');
+    }
   };
 
   const reset=()=>{
