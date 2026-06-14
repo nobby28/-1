@@ -94,7 +94,7 @@ const SYS=`あなたは薬局の仕切書から医薬品情報を抽出する専
 数値は数値型で。読み取れない場合はnull。`;
 
 /* ── IMAGE COMPRESSION ── */
-async function compressImage(file,maxPx=2048,quality=0.85){
+async function compressImage(file,maxPx=1600,quality=0.80){
   return new Promise(resolve=>{
     const img=new Image();
     const url=URL.createObjectURL(file);
@@ -167,6 +167,30 @@ function fileToB64(file){
     r.onerror=rej;
     r.readAsDataURL(file);
   });
+}
+
+/* ── API CONNECTION TEST ── */
+async function testApiConnection(apiKey,model){
+  const ctrl=new AbortController();
+  const tid=setTimeout(()=>ctrl.abort(),30000);
+  try{
+    const res=await fetch('https://api.anthropic.com/v1/messages',{
+      method:'POST',credentials:'omit',signal:ctrl.signal,
+      headers:{'Content-Type':'application/json','x-api-key':apiKey,
+        'anthropic-version':'2023-06-01','anthropic-dangerous-allow-browser':'true'},
+      body:JSON.stringify({model:model||'claude-sonnet-4-6',max_tokens:5,
+        messages:[{role:'user',content:'hi'}]})
+    });
+    clearTimeout(tid);
+    if(res.status===401) return{ok:false,msg:'401: APIキーが無効です'};
+    if(!res.ok){const e=await res.json().catch(()=>({error:{message:res.statusText}}));
+      return{ok:false,msg:`HTTP ${res.status}: ${e.error?.message||res.statusText}`};}
+    return{ok:true,msg:'接続成功！APIキーは正常です ✓'};
+  }catch(fe){
+    clearTimeout(tid);
+    if(fe.name==='AbortError') return{ok:false,msg:'タイムアウト（30秒）: ネット接続を確認してください'};
+    return{ok:false,msg:'接続失敗: '+fe.message};
+  }
 }
 
 /* ── EXCEL EXPORT ── */
@@ -666,10 +690,19 @@ function EditModal({item,onSave,onClose}){
 }
 
 /* ── SETTINGS TAB ── */
-function SettingsTab({apiKey,model,onSaveKey,onSaveModel,items,onExport,onClearAll}){
+function SettingsTab({apiKey,model,onSaveKey,onSaveModel,items,onExport,onClearAll,onToast}){
   const[key,setKey]=useState(apiKey);
   const[show,setShow]=useState(false);
   const[mdl,setMdl]=useState(model);
+  const[testing,setTesting]=useState(false);
+  const[testResult,setTestResult]=useState(null);
+
+  const runTest=async()=>{
+    if(!key){setTestResult({ok:false,msg:'APIキーを入力してから保存してください'});return;}
+    setTesting(true);setTestResult(null);
+    const r=await testApiConnection(key,mdl);
+    setTesting(false);setTestResult(r);
+  };
 
   return h('div',{style:{flex:1,overflowY:'auto',padding:'16px',paddingBottom:'calc(80px + env(safe-area-inset-bottom))'}},
     // API Key
@@ -680,12 +713,23 @@ function SettingsTab({apiKey,model,onSaveKey,onSaveModel,items,onExport,onClearA
         'キーは端末内にのみ保存されます'
       ),
       h('div',{style:{display:'flex',gap:8,marginBottom:10}},
-        h('input',{type:show?'text':'password',value:key,onChange:e=>setKey(e.target.value),placeholder:'sk-ant-...',
+        h('input',{type:show?'text':'password',value:key,onChange:e=>{setKey(e.target.value);setTestResult(null);},placeholder:'sk-ant-...',
           style:{flex:1,padding:'10px 12px',borderRadius:10,border:`1px solid ${C.border}`,
             background:C.surface,color:C.text,fontSize:13,fontFamily:F,outline:'none'}}),
         h(Btn,{onClick:()=>setShow(p=>!p),ghost:true,color:C.textMid,sm:true},show?'🙈':'👁')
       ),
-      h(Btn,{onClick:()=>onSaveKey(key),color:C.green,full:true},'保存する')
+      h('div',{style:{display:'flex',gap:8,marginBottom:testResult?10:0}},
+        h(Btn,{onClick:()=>onSaveKey(key),color:C.green,full:true},'保存する'),
+        h(Btn,{onClick:runTest,disabled:testing,color:C.sky,style:{flexShrink:0}},
+          testing?'確認中…':'接続テスト')
+      ),
+      testResult&&h('div',{style:{
+        padding:'10px 12px',borderRadius:8,fontSize:12,lineHeight:1.7,fontFamily:F,
+        background:testResult.ok?C.green+'22':C.red+'22',
+        color:testResult.ok?C.greenLight:C.red,
+        border:`1px solid ${testResult.ok?C.green+'44':C.red+'44'}`,
+        whiteSpace:'pre-wrap',
+      }},testResult.msg)
     ),
     // Model
     h(Card,{style:{padding:'18px',marginBottom:14}},
