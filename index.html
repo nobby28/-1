@@ -46,10 +46,10 @@ const C={
 const F="'Hiragino Sans','Noto Sans JP',sans-serif";
 
 /* ── STORAGE ── */
-const STORE_KEY='yakuzai_v2';
+const STORE_KEY='yakuzai_v3';
 function loadStore(){
-  try{return JSON.parse(localStorage.getItem(STORE_KEY)||'{"apiKey":"","model":"claude-sonnet-4-6","items":[]}');}
-  catch{return{apiKey:'',model:'claude-sonnet-4-6',items:[]};}
+  try{return JSON.parse(localStorage.getItem(STORE_KEY)||'{"apiKey":"","model":"claude-sonnet-4-6","proxyUrl":"","items":[]}');}
+  catch{return{apiKey:'',model:'claude-sonnet-4-6',proxyUrl:'',items:[]};}
 }
 function saveStore(s){localStorage.setItem(STORE_KEY,JSON.stringify(s));}
 
@@ -116,12 +116,13 @@ async function compressImage(file,maxPx=1600,quality=0.80){
 }
 
 /* ── AI CALL ── */
-async function extractInvoice(base64,mediaType,apiKey,model){
+async function extractInvoice(base64,mediaType,apiKey,model,proxyUrl){
+  const ep=(proxyUrl?proxyUrl.replace(/\/+$/,''):'https://api.anthropic.com')+'/v1/messages';
   const ctrl=new AbortController();
   const tid=setTimeout(()=>ctrl.abort(),90000);
   let res;
   try{
-    res=await fetch('https://api.anthropic.com/v1/messages',{
+    res=await fetch(ep,{
       method:'POST',
       credentials:'omit',
       signal:ctrl.signal,
@@ -170,11 +171,12 @@ function fileToB64(file){
 }
 
 /* ── API CONNECTION TEST ── */
-async function testApiConnection(apiKey,model){
+async function testApiConnection(apiKey,model,proxyUrl){
+  const ep=(proxyUrl?proxyUrl.replace(/\/+$/,''):'https://api.anthropic.com')+'/v1/messages';
   const ctrl=new AbortController();
   const tid=setTimeout(()=>ctrl.abort(),30000);
   try{
-    const res=await fetch('https://api.anthropic.com/v1/messages',{
+    const res=await fetch(ep,{
       method:'POST',credentials:'omit',signal:ctrl.signal,
       headers:{'Content-Type':'application/json','x-api-key':apiKey,
         'anthropic-version':'2023-06-01','anthropic-dangerous-allow-browser':'true'},
@@ -314,7 +316,7 @@ function BottomNav({active,onChange}){
 }
 
 /* ── SCAN TAB ── */
-function ScanTab({apiKey,model,onScanned}){
+function ScanTab({apiKey,model,proxyUrl,onScanned}){
   const[mode,setMode]=useState('idle');
   const[preview,setPreview]=useState(null);
   const[capFile,setCapFile]=useState(null);
@@ -356,7 +358,7 @@ function ScanTab({apiKey,model,onScanned}){
     try{
       const compressed=await compressImage(capFile);
       const b64=await fileToB64(compressed);
-      const result=await extractInvoice(b64,'image/jpeg',apiKey,model);
+      const result=await extractInvoice(b64,'image/jpeg',apiKey,model,proxyUrl);
       if(!result.items?.length)throw new Error('商品情報が読み取れませんでした（0件）');
       onScanned(result);reset();
     }catch(e){
@@ -690,17 +692,33 @@ function EditModal({item,onSave,onClose}){
 }
 
 /* ── SETTINGS TAB ── */
-function SettingsTab({apiKey,model,onSaveKey,onSaveModel,items,onExport,onClearAll,onToast}){
+const WORKER_CODE=`export default {
+  async fetch(req) {
+    const h={'Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods':'POST,OPTIONS','Access-Control-Allow-Headers':'*'};
+    if(req.method==='OPTIONS') return new Response(null,{headers:h});
+    const body=await req.text();
+    const r=await fetch('https://api.anthropic.com'+new URL(req.url).pathname,{
+      method:'POST',headers:{'Content-Type':'application/json',
+        'x-api-key':req.headers.get('x-api-key'),
+        'anthropic-version':req.headers.get('anthropic-version')||'2023-06-01',
+        'anthropic-dangerous-allow-browser':'true'},body});
+    return new Response(await r.text(),{status:r.status,headers:{...h,'Content-Type':'application/json'}});
+  }
+};`;
+
+function SettingsTab({apiKey,model,proxyUrl,onSaveKey,onSaveModel,onSaveProxy,items,onExport,onClearAll}){
   const[key,setKey]=useState(apiKey);
   const[show,setShow]=useState(false);
   const[mdl,setMdl]=useState(model);
+  const[proxy,setProxy]=useState(proxyUrl||'');
   const[testing,setTesting]=useState(false);
   const[testResult,setTestResult]=useState(null);
+  const[showWorker,setShowWorker]=useState(false);
 
   const runTest=async()=>{
-    if(!key){setTestResult({ok:false,msg:'APIキーを入力してから保存してください'});return;}
+    if(!key){setTestResult({ok:false,msg:'APIキーを入力して保存してください'});return;}
     setTesting(true);setTestResult(null);
-    const r=await testApiConnection(key,mdl);
+    const r=await testApiConnection(key,mdl,proxy);
     setTesting(false);setTestResult(r);
   };
 
@@ -751,6 +769,43 @@ function SettingsTab({apiKey,model,onSaveKey,onSaveModel,items,onExport,onClearA
         '同じJANは1行にまとめ、納入日・数量・単価・期限を横に並べます'
       ),
       h(Btn,{onClick:onExport,color:C.sky,full:true,disabled:!items.length},'⬇ Excel (.xlsx) でダウンロード')
+    ),
+    // Proxy
+    h(Card,{style:{padding:'18px',marginBottom:14}},
+      h('div',{style:{fontWeight:800,fontSize:15,color:C.text,marginBottom:3,fontFamily:F}},'🌐 プロキシ設定（接続エラーの場合）'),
+      h('div',{style:{fontSize:12,color:C.textMid,marginBottom:10,lineHeight:1.7}},
+        '接続エラーが出る場合、Cloudflare Workerを経由して',h('br'),
+        'CORSを回避できます。URLを入力して保存してください。'
+      ),
+      h('div',{style:{display:'flex',gap:8,marginBottom:8}},
+        h('input',{type:'url',value:proxy,onChange:e=>setProxy(e.target.value),placeholder:'https://your-worker.workers.dev',
+          style:{flex:1,padding:'8px 10px',borderRadius:8,border:`1px solid ${proxy?C.green:C.border}`,
+            background:C.surface,color:C.text,fontSize:12,fontFamily:F,outline:'none'}}),
+        h(Btn,{onClick:()=>onSaveProxy(proxy),color:proxy?C.green:C.textMid,sm:true},'保存')
+      ),
+      proxy&&h('div',{style:{fontSize:11,color:C.greenLight,marginBottom:8}},'✓ プロキシ有効: '+proxy),
+      h('button',{onClick:()=>setShowWorker(p=>!p),style:{
+        background:'transparent',border:'none',color:C.sky,fontSize:12,
+        cursor:'pointer',fontFamily:F,padding:0,textDecoration:'underline',
+      }},showWorker?'▲ Workerコードを隠す':'▼ Cloudflare Workerコードを表示'),
+      showWorker&&h('div',{style:{marginTop:8}},
+        h('div',{style:{fontSize:11,color:C.textMid,marginBottom:6,lineHeight:1.8}},
+          '① cloudflare.com で無料アカウント作成',h('br'),
+          '② Workers & Pages → Create Worker',h('br'),
+          '③ 下記コードを貼り付けてデプロイ',h('br'),
+          '④ 表示されたURLをプロキシURLに入力'
+        ),
+        h('div',{style:{position:'relative'}},
+          h('pre',{style:{
+            background:'#0a1520',border:`1px solid ${C.border}`,borderRadius:8,
+            padding:'10px 12px',fontSize:10,color:'#8fc',overflowX:'auto',
+            lineHeight:1.6,whiteSpace:'pre-wrap',wordBreak:'break-all',
+            fontFamily:'monospace',margin:0,
+          }},WORKER_CODE),
+          h(Btn,{onClick:()=>{navigator.clipboard?.writeText(WORKER_CODE);},
+            color:C.sky,sm:true,style:{position:'absolute',top:6,right:6}},'コピー')
+        )
+      )
     ),
     // Clear
     h(Card,{style:{padding:'18px'}},
@@ -823,12 +878,13 @@ function App(){
     ),
 
     h('div',{style:{flex:1,overflow:'hidden',display:'flex',flexDirection:'column'}},
-      tab==='scan'&&h(ScanTab,{apiKey:store.apiKey,model:store.model,onScanned:setScanned}),
+      tab==='scan'&&h(ScanTab,{apiKey:store.apiKey,model:store.model,proxyUrl:store.proxyUrl,onScanned:setScanned}),
       tab==='table'&&h(TableTab,{items:store.items,onEdit:setEditing,onDelete:handleDelete}),
       tab==='settings'&&h(SettingsTab,{
-        apiKey:store.apiKey,model:store.model,
+        apiKey:store.apiKey,model:store.model,proxyUrl:store.proxyUrl,
         onSaveKey:key=>{update({...store,apiKey:key});toast('APIキーを保存しました');},
         onSaveModel:m=>{update({...store,model:m});toast('モデルを変更しました');},
+        onSaveProxy:p=>{update({...store,proxyUrl:p});toast(p?'プロキシURLを保存しました':'プロキシを無効にしました');},
         items:store.items,
         onExport:()=>{exportToExcel(store.items);toast('Excelをダウンロードしました');},
         onClearAll:()=>{update({...store,items:[]});toast('全データを削除しました','warn');},
