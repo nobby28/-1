@@ -117,24 +117,36 @@ async function compressImage(file,maxPx=2048,quality=0.85){
 
 /* ── AI CALL ── */
 async function extractInvoice(base64,mediaType,apiKey,model){
-  const res=await fetch('https://api.anthropic.com/v1/messages',{
-    method:'POST',
-    headers:{
-      'Content-Type':'application/json',
-      'x-api-key':apiKey,
-      'anthropic-version':'2023-06-01',
-      'anthropic-dangerous-allow-browser':'true',
-    },
-    body:JSON.stringify({
-      model:model||'claude-sonnet-4-6',
-      max_tokens:4096,
-      system:SYS,
-      messages:[{role:'user',content:[
-        {type:'image',source:{type:'base64',media_type:mediaType,data:base64}},
-        {type:'text',text:'この仕切書からデータを抽出してください。'},
-      ]}]
-    })
-  });
+  const ctrl=new AbortController();
+  const tid=setTimeout(()=>ctrl.abort(),90000);
+  let res;
+  try{
+    res=await fetch('https://api.anthropic.com/v1/messages',{
+      method:'POST',
+      credentials:'omit',
+      signal:ctrl.signal,
+      headers:{
+        'Content-Type':'application/json',
+        'x-api-key':apiKey,
+        'anthropic-version':'2023-06-01',
+        'anthropic-dangerous-allow-browser':'true',
+      },
+      body:JSON.stringify({
+        model:model||'claude-sonnet-4-6',
+        max_tokens:4096,
+        system:SYS,
+        messages:[{role:'user',content:[
+          {type:'image',source:{type:'base64',media_type:mediaType,data:base64}},
+          {type:'text',text:'この仕切書からデータを抽出してください。'},
+        ]}]
+      })
+    });
+  }catch(fe){
+    clearTimeout(tid);
+    if(fe.name==='AbortError') throw new Error('タイムアウト: 90秒経過。再試行してください');
+    throw new Error('接続エラー: Anthropic APIに繋がりません。ページを再読み込みして再試行してください ('+fe.message+')');
+  }
+  clearTimeout(tid);
   if(!res.ok){
     const e=await res.json().catch(()=>({error:{message:res.statusText}}));
     const msg=e.error?.message||res.statusText;
@@ -325,9 +337,14 @@ function ScanTab({apiKey,model,onScanned}){
       onScanned(result);reset();
     }catch(e){
       const msg=e.message||'不明なエラー';
-      setErr(msg.startsWith('[HTTP 401]')?'APIキーが無効です。設定タブで正しいキーを入力してください':
-             msg.startsWith('[HTTP 4')?'APIエラー: '+msg:
-             '読み取りエラー: '+msg);
+      let userMsg;
+      if(msg.startsWith('接続エラー')||msg.includes('Failed to fetch')||msg.includes('NetworkError'))
+        userMsg='接続エラー: Anthropic APIに繋がりません。\n①ページを再読み込みして再試行\n②ネット接続を確認してください';
+      else if(msg.startsWith('タイムアウト')) userMsg=msg;
+      else if(msg.startsWith('[HTTP 401]')) userMsg='APIキーエラー: 設定タブで正しいAnthropicキーを入力してください';
+      else if(msg.startsWith('[HTTP 4')||msg.startsWith('[HTTP 5]')) userMsg='APIエラー: '+msg;
+      else userMsg='読み取りエラー: '+msg;
+      setErr(userMsg);
       setMode('preview');
     }
   };
