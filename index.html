@@ -177,17 +177,20 @@ async function testApiConnection(apiKey,model,proxyUrl){
   const tid=setTimeout(()=>ctrl.abort(),30000);
   try{
     const res=await fetch(ep,{
-      method:'POST',credentials:'omit',signal:ctrl.signal,
+      method:'POST',signal:ctrl.signal,
       headers:{'Content-Type':'application/json','x-api-key':apiKey,
         'anthropic-version':'2023-06-01','anthropic-dangerous-allow-browser':'true'},
       body:JSON.stringify({model:model||'claude-sonnet-4-6',max_tokens:5,
-        messages:[{role:'user',content:'hi'}]})
+        messages:[{role:'user',content:[{type:'text',text:'hi'}]}]})
     });
     clearTimeout(tid);
-    if(res.status===401) return{ok:false,msg:'401: APIキーが無効です'};
-    if(!res.ok){const e=await res.json().catch(()=>({error:{message:res.statusText}}));
-      return{ok:false,msg:`HTTP ${res.status}: ${e.error?.message||res.statusText}`};}
-    return{ok:true,msg:'接続成功！APIキーは正常です ✓'};
+    const txt=await res.text().catch(()=>'');
+    let detail='';
+    try{const j=JSON.parse(txt);detail=j.error?.message||j.detail||JSON.stringify(j).slice(0,200);}
+    catch{detail=txt.slice(0,200);}
+    if(res.status===200) return{ok:true,msg:'接続成功！APIキーは正常です ✓'};
+    if(res.status===401) return{ok:false,msg:'401: APIキーが無効です。正しいキーを入力してください'};
+    return{ok:false,msg:`HTTP ${res.status}${detail?' → '+detail:''}`};
   }catch(fe){
     clearTimeout(tid);
     if(fe.name==='AbortError') return{ok:false,msg:'タイムアウト（30秒）: ネット接続を確認してください'};
