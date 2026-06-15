@@ -185,11 +185,13 @@ async function testApiConnection(apiKey,model,proxyUrl){
     });
     clearTimeout(tid);
     const txt=await res.text().catch(()=>'');
-    let detail='';
-    try{const j=JSON.parse(txt);detail=j.error?.message||j.detail||JSON.stringify(j).slice(0,200);}
-    catch{detail=txt.slice(0,200);}
     if(res.status===200) return{ok:true,msg:'接続成功！APIキーは正常です ✓'};
     if(res.status===401) return{ok:false,msg:'401: APIキーが無効です。正しいキーを入力してください'};
+    if(txt.includes('<html')&&(res.status===405||res.status===403||res.status===406))
+      return{ok:false,blocked:true,msg:'⚠ 通信キャリアまたはネットワークがAnthropicへの接続をブロックしています（HTTP '+res.status+'）。\n下の「プロキシ設定」カードでCloudflare Workerを設定すると解決できます。'};
+    let detail='';
+    try{const j=JSON.parse(txt);detail=j.error?.message||j.detail||JSON.stringify(j).slice(0,200);}
+    catch{detail=txt.slice(0,150);}
     return{ok:false,msg:`HTTP ${res.status}${detail?' → '+detail:''}`};
   }catch(fe){
     clearTimeout(tid);
@@ -723,6 +725,7 @@ function SettingsTab({apiKey,model,proxyUrl,onSaveKey,onSaveModel,onSaveProxy,it
     setTesting(true);setTestResult(null);
     const r=await testApiConnection(key,mdl,proxy);
     setTesting(false);setTestResult(r);
+    if(r.blocked) setShowWorker(true);
   };
 
   return h('div',{style:{flex:1,overflowY:'auto',padding:'16px',paddingBottom:'calc(80px + env(safe-area-inset-bottom))'}},
